@@ -124,7 +124,7 @@ def train(model, train_dataloader, steps, lr, steps_til_summary,
                 torch.save(model.state_dict(),
                            os.path.join(checkpoints_dir,
                                         'model_current.pth'))
-                summary_fn(model, model_input, gt, model_output, writer, step)
+                # summary_fn(model, model_input, gt, model_output, writer, step)
 
             if not use_lbfgs:
                 optim.zero_grad(set_to_none=True)

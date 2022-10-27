@@ -15,6 +15,9 @@ import configargparse
 import torch
 from functools import partial
 
+import math
+
+
 torch.backends.cudnn.benchmark = True
 torch.set_num_threads(4)
 
@@ -62,7 +65,7 @@ p.add_argument('--no_pe', action='store_true', default=False,
 # data processing and i/o
 p.add_argument('--centered', action='store_true', default=False,
                help='centere input coordinates as -1 to 1')
-p.add_argument('--img_fn', type=str, default='../data/lighthouse.png',
+p.add_argument('--img_fn', type=str, default='/ubc/cs/research/kmyi/zwu/home/codes/bacon/data/images/tokyo.jpg',
                help='path to specific png filename')
 p.add_argument('--grayscale', action='store_true', default=False,
                help='if grayscale image')
@@ -78,7 +81,7 @@ opt = p.parse_args()
 if opt.experiment_name is None and opt.render_model is None:
     p.error('--experiment_name is required.')
 
-os.environ["CUDA_VISIBLE_DEVICES"] = str(opt.gpu)
+# os.environ["CUDA_VISIBLE_DEVICES"] = str(opt.gpu)
 
 
 def main():
@@ -91,6 +94,7 @@ def main():
 
 
 def train():
+    device = torch.device("cuda")
 
     # set up logging dir
     opt.root_path = os.path.join(opt.logging_root, opt.experiment_name)
@@ -115,14 +119,61 @@ def train():
                    steps_til_checkpoint=opt.steps_til_ckpt,
                    model_dir=opt.root_path, loss_fn=loss_fn, summary_fn=summary_fn)
 
+    ### Output the final reconstruction image
+    path = f"{opt.root_path}/result.jpg"
+    print(f"Writing '{path}'... ", end="")
+
+    # resolution = image.data.shape[0:2]
+    # img_shape = image.data.shape
+    # n_pixels = resolution[0] * resolution[1]
+
+    resolution = val_dataset.img_chw.shape[1:]
+    img_shape = resolution + tuple([3])
+
+    half_dx = 0.5 / resolution[0]
+    half_dy = 0.5 / resolution[1]
+    xs = torch.linspace(half_dx, 1 - half_dx, resolution[0], device=device)
+    ys = torch.linspace(half_dy, 1 - half_dy, resolution[1], device=device)
+    xv, yv = torch.meshgrid([xs, ys], indexing="ij")
+
+    xy = torch.stack((xv.flatten(), yv.flatten())).t()
+    xy = xy - 0.5
+
+    xy_max_num = math.ceil(xy.shape[0] / 1024.0)
+    padding_delta = xy_max_num * 1024 - xy.shape[0]
+    zeros_padding = torch.zeros((padding_delta, 2)).cuda()
+    xy_padded = torch.cat([xy, zeros_padding], dim=0)
+
+    with torch.no_grad():
+        pred_img = process_batch_in_chunks(xy_padded, model, max_chunk_size=2 ** 18)
+        pred_img = pred_img[:xy.shape[0], :].reshape(img_shape).float().clamp(0.0, 1.0).numpy()
+        # Record psnr and ssim
+        dataio.save_img(pred_img, path)
+    print("done.")
+
+
+def process_batch_in_chunks(in_ccords, model, max_chunk_size=1024):
+    chunk_outs = []
+    coord_chunks = torch.split(in_ccords, max_chunk_size)
+
+    for chunk_batched_in in coord_chunks:
+        inputs = dict({'coords': chunk_batched_in})
+        tmp_img = model(inputs)['model_out']['output'][-1]
+        chunk_outs.append(tmp_img.detach().cpu())
+
+    batched_out = torch.cat(chunk_outs, dim=0)
+    return batched_out
+
 
 def init_dataloader(opt):
     ''' load image datasets, dataloader '''
 
-    if opt.img_fn == '../data/lighthouse.png':
-        url = 'http://www.cs.albany.edu/~xypan/research/img/Kodak/kodim19.png'
-    else:
-        url = None
+    # if opt.img_fn == '../data/lighthouse.png':
+    #     url = 'http://www.cs.albany.edu/~xypan/research/img/Kodak/kodim19.png'
+    # else:
+    #     url = None
+
+    url = None
 
     # init datasets
     trn_dataset = dataio.ImageFile(opt.img_fn, grayscale=opt.grayscale, resolution=(opt.res, opt.res), url=url)

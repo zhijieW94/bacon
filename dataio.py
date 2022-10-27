@@ -118,7 +118,7 @@ def xcosx(coords):
 
 class ImageWrapper(torch.utils.data.Dataset):
     def __init__(self, dataset, compute_diff='all', centered=True,
-                 include_end=False, multiscale=False, stages=3):
+                 include_end=False, multiscale=False, stages=3, batch_size=2**18):
 
         self.compute_diff = compute_diff
         self.centered = centered
@@ -151,13 +151,23 @@ class ImageWrapper(torch.utils.data.Dataset):
             self.imgs.append(torch.from_numpy(tmp).view(-1, self.dataset.img_channels))
         self.imgs.reverse()
 
+        self.img_size = self.rows * self.cols
+
+        self.batch_size = batch_size
+
+
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
 
-        coords = self.mgrid
-        img = self.img
+        rand_idx = torch.randint(0, self.img_size, (self.batch_size, ))
+
+        # coords = self.mgrid
+        # img = self.img
+
+        coords = torch.index_select(self.mgrid, 0, rand_idx)
+        img = torch.index_select(self.img, 0, rand_idx)
 
         in_dict = {'coords': coords, 'radii': self.radii}
         gt_dict = {'img': img}
@@ -210,12 +220,12 @@ class ImageFile(Dataset):
         self.img_channels = len(self.img.mode)
         self.resolution = self.img.size
 
-        if crop_square:  # preserve aspect ratio
-            self.img = crop_max_square(self.img)
+        # if crop_square:  # preserve aspect ratio
+        #     self.img = crop_max_square(self.img)
 
-        if resolution is not None:
-            self.resolution = resolution
-            self.img = self.img.resize(resolution, Image.ANTIALIAS)
+        # if resolution is not None:
+        #     self.resolution = resolution
+        #     self.img = self.img.resize(resolution, Image.ANTIALIAS)
 
         self.img = np.array(self.img)
         self.img = self.img.astype(np.float32)/255.

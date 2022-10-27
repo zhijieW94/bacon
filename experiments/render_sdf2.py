@@ -36,65 +36,13 @@ def export_model(ckpt_path, model_name, N=512, model_type='bacon', hidden_layers
     model.load_state_dict(ckpt)
     model.cuda()
 
-    model.eval()
-
     if not adaptive:
         # extracts separate meshes for each scale
         generate_mesh(model, N, return_sdf, num_outputs, model_name)
-        # generate_mesh2(model, N, return_sdf, num_outputs, model_name)
 
     else:
         # extracts single-scale output
         generate_mesh_adaptive(model, model_name)
-
-def generate_mesh2(model, grid_res, return_sdf=False, num_outputs=4, model_name='model'):
-    # Prepare directory
-    model.eval()
-
-    num_samples = grid_res ** 3
-
-    sdf_values = torch.zeros(num_samples, 1)
-    sdf_values.requires_grad = False
-
-    head = 0
-    max_batch = int(2 ** 18)
-
-    with torch.no_grad():
-        bound_min = torch.FloatTensor([-1.0, -1.0, -1.0])
-        bound_max = torch.FloatTensor([1.0, 1.0, 1.0])
-
-        X = torch.linspace(bound_min[0], bound_max[0], grid_res)
-        Y = torch.linspace(bound_min[1], bound_max[1], grid_res)
-        Z = torch.linspace(bound_min[2], bound_max[2], grid_res)
-
-        xx, yy, zz = torch.meshgrid(X, Y, Z, indexing='ij')
-        inputs = torch.concat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1).cuda()  # [N, 3]
-
-        while head < num_samples:
-            sample_subset = inputs[head: min(head + max_batch, num_samples), :]
-
-            sdf_values[head: min(head + max_batch, num_samples), 0] = (
-                model({'coords': sample_subset})['model_out'][-1].squeeze(1).detach().cpu()
-            )
-            head += max_batch
-
-    print(f"==> After computing SDF values.")
-
-    sdf_values = sdf_values.reshape(grid_res, grid_res, grid_res)
-
-    numpy_3d_sdf_tensor = sdf_values.data.cpu().numpy()
-
-    verts, faces = mcubes.marching_cubes(-numpy_3d_sdf_tensor, 0.0)
-
-
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    mesh.vertices = (mesh.vertices / N - 0.5) + 0.5 / N
-
-    os.makedirs('./outputs/meshes', exist_ok=True)
-    mesh.export(f"./outputs/meshes/{model_name}.ply")
-
-    print(f"==> Finished saving mesh.")
-
 
 
 def generate_mesh(model, N, return_sdf=False, num_outputs=4, model_name='model'):
@@ -104,13 +52,12 @@ def generate_mesh(model, N, return_sdf=False, num_outputs=4, model_name='model')
     if return_sdf:
         x = torch.arange(-N//2, N//2) / N
         x = x.float()
-    x, y, z = torch.meshgrid(x, x, x, indexing='ij')
+    x, y, z = torch.meshgrid(x, x, x)
     render_coords = torch.stack((x.flatten(), y.flatten(), z.flatten()), dim=-1).cuda()
-    sdf_values = np.zeros((N**3, 1))
-    # sdf_values.requires_grad = False
+    sdf_values = [np.zeros((N**3, 1)) for i in range(num_outputs)]
 
     # render in a batched fashion to save memory
-    bsize = int(64**2)
+    bsize = int(128**2)
     for i in tqdm(range(int(N**3 / bsize))):
         coords = render_coords[i*bsize:(i+1)*bsize, :]
         out = model({'coords': coords})['model_out']
@@ -118,18 +65,20 @@ def generate_mesh(model, N, return_sdf=False, num_outputs=4, model_name='model')
         if not isinstance(out, list):
             out = [out, ]
 
-        sdf_values[i*bsize:(i+1)*bsize] = out[-1].detach().cpu().numpy()
+        for idx, sdf in enumerate(out):
+            sdf_values[idx][i*bsize:(i+1)*bsize] = sdf.detach().cpu().numpy()
 
     if return_sdf:
-        return sdf_values
+        return [sdf.reshape(N, N, N) for sdf in sdf_values]
 
-    sdf = sdf_values.reshape(N, N, N)
-    vertices, triangles = mcubes.marching_cubes(-sdf, 0)
-    mesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
-    mesh.vertices = (mesh.vertices / N - 0.5) + 0.5 / N
+    for idx, sdf in enumerate(sdf_values):
+        sdf = sdf.reshape(N, N, N)
+        vertices, triangles = mcubes.marching_cubes(-sdf, 0)
+        mesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
+        mesh.vertices = (mesh.vertices / N - 0.5) + 0.5/N
 
-    os.makedirs('./outputs/meshes', exist_ok=True)
-    mesh.export(f"./outputs/meshes/{model_name}.ply")
+        os.makedirs('./outputs/meshes',  exist_ok=True)
+        mesh.export(f"./outputs/meshes/{model_name}_{idx+1}.obj")
 
 
 def prepare_multi_scale(res, num_scales):
@@ -225,16 +174,13 @@ def generate_mesh_adaptive(model, model_name):
 
 
 def export_meshes(adaptive=True):
-    # bacon_ckpts = ['../trained_models/engine_acorn.pth']
-    # bacon_ckpts = ['../trained_models/thai.pth']
-    # bacon_ckpts = ['../trained_models/asian_dragon.pth']
-    bacon_ckpts = ['../trained_models/beard_man.pth']
+    bacon_ckpts = ['../trained_models/engine_acorn.pth']
 
-    bacon_names = ['beard_man']
+    bacon_names = ['bacon_engine_acorn']
 
     print('Exporting BACON')
     for ckpt, name in tqdm(zip(bacon_ckpts, bacon_names), total=len(bacon_ckpts)):
-        export_model(ckpt, name, N=1024, model_type='bacon', output_layers=output_layers, adaptive=adaptive)
+        export_model(ckpt, name, model_type='bacon', output_layers=output_layers, adaptive=adaptive)
 
 
 def init_multiscale_mc():
@@ -249,14 +195,13 @@ def init_multiscale_mc():
 
 if __name__ == '__main__':
     global N, output_layers, subdiv_hashes, lowest_res, coords_list, sdf_out_list, num_outputs
-    N = 1024
-    # output_layers = [2, 4, 6, 8]
-    output_layers = [8]
+    N = 512
+    output_layers = [2, 4, 6, 8]
     num_outputs = len(output_layers)
 
-    # subdiv_hashes, lowest_res, coords_list, sdf_out_list = init_multiscale_mc()
+    subdiv_hashes, lowest_res, coords_list, sdf_out_list = init_multiscale_mc()
 
     # export meshes, use adaptive SDF evaluation or not
     # setting adaptive=False will output meshes at all resolutions
     # while adaptive=True while extract only a high-resolution mesh
-    export_meshes(adaptive=False)
+    export_meshes(adaptive=True)
